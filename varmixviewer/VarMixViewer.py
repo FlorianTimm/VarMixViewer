@@ -25,6 +25,9 @@ from PyQt5.QtCore import QSettings, QTranslator, qVersion, QCoreApplication
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QAction
 
+from qgis.core import QgsVectorLayer, QgsDistanceArea, QgsCoordinateReferenceSystem, QgsCoordinateTransformContext, QgsFeature, QgsPointXY, \
+    QgsGeometry, QgsExpression, QgsFeatureRequest, QgsProject
+
 # Initialize Qt resources from file resources.py
 from .resources import *
 # Import the code for the dialog
@@ -182,6 +185,90 @@ class VarMixViewer:
         del self.toolbar
 
 
+    def cutStation(self, abschnitt, zeile):
+        feat = QgsFeature(zeile)
+        alen = abschnitt['Abschnittslaenge']
+        geom = abschnitt.geometry()
+        glen = geom.length()
+
+        faktor = alen / glen
+
+        vst = zeile['vst'] * faktor
+        bst = zeile['bst'] * faktor
+
+        points = geom.asPolyline()
+        p_old = QgsPointXY(points[0])
+
+        sum = 0
+        line = []
+        for p in points:
+            p = QgsPointXY(p)
+            dist = self.distanz.measureLine(p_old, p)
+            sum += dist
+            if sum > vst and len(line) == 0:
+                # print("Anfang")
+                part = (sum - vst) / dist
+                x = p.x() - part * (p.x() - p_old.x())
+                y = p.y() - part * (p.y() - p_old.y())
+                line.append(QgsPointXY(x, y))
+            if sum > bst:
+                part = (sum - bst) / dist
+                # print(part)
+                x = p.x() - part * (p.x() - p_old.x())
+                y = p.y() - part * (p.y() - p_old.y())
+                line.append(QgsPointXY(x, y))
+                break
+            if sum > vst:
+                line.append(p)
+                # print(sum)
+            p_old = p
+
+        feat.setGeometry(QgsGeometry.fromPolylineXY(line))
+        return feat
+
+
+    def selectAbschnitt(self, vnk, nnk):
+        exp = QgsExpression('\"Anfangsnetzknoten\" = \'' + vnk + '\' AND \"Endnetzknoten\" = \'' + nnk + '\'')
+        request = QgsFeatureRequest(exp)
+        for f in self.netz.getFeatures(request):
+            return f
+        return None
+
+    def generateLayer(self):
+        self.netz = QgsVectorLayer(self.dlg.mQgsFileWidget_2.filePath(), "netz", "ogr")
+        varmix = QgsVectorLayer(self.dlg.mQgsFileWidget.filePath(), "varMix", "ogr")
+        # varmix = QgsVectorLayer("D:\kreis.xls", "varMix", "ogr")
+
+        self.distanz = QgsDistanceArea()
+        self.distanz.setSourceCrs(QgsCoordinateReferenceSystem(25832), QgsCoordinateTransformContext())
+        self.distanz.setEllipsoid('GRS80')
+
+        # d.setEllipsoidalMode(True)
+        achsen = QgsVectorLayer("linestring?crs=" + self.netz.crs().authid(), "VarMix", "memory")
+        achsen.startEditing()
+        achsenData = achsen.dataProvider()
+
+        achsenData.addAttributes(varmix.fields())  #
+        achsen.commitChanges()
+        QgsProject.instance().addMapLayer(achsen)
+
+        erg = varmix.getFeatures()
+        vnk = ""
+        nnk = ""
+        feat = None
+        for e in erg:
+            if not (vnk == e['VNK'] and nnk == e['NNK']):
+                vnk = e['VNK']
+                nnk = e['NNK']
+                feat = self.selectAbschnitt(vnk, nnk)
+            if feat is None:
+                # achsenData.addFeatures(e)
+                pass
+            else:
+                achsenData.addFeatures([self.cutStation(feat, e)])
+
+
+
     def run(self):
         """Run method that performs all the real work"""
         # show the dialog
@@ -192,4 +279,7 @@ class VarMixViewer:
         if result:
             # Do something useful here - delete the line containing pass and
             # substitute with your code.
+            self.generateLayer()
             pass
+
+
