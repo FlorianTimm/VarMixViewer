@@ -32,6 +32,7 @@ from qgis.core import QgsVectorLayer, QgsDistanceArea, QgsCoordinateReferenceSys
 from .resources import *
 # Import the code for the dialog
 from .VarMixViewer_dialog import VarMixViewerDialog
+from .PointLayer_dialog import PointLayerDialog
 import os.path
 
 
@@ -66,6 +67,7 @@ class VarMixViewer:
 
         # Create the dialog (after translation) and keep reference
         self.dlg = VarMixViewerDialog()
+        self.pld = PointLayerDialog()
 
         # Declare instance attributes
         self.actions = []
@@ -73,6 +75,12 @@ class VarMixViewer:
         # TODO: We are going to let the user set this up in a future iteration
         self.toolbar = self.iface.addToolBar(u'VarMixViewer')
         self.toolbar.setObjectName(u'VarMixViewer')
+
+        self.distanz = QgsDistanceArea()
+        self.distanz.setSourceCrs(QgsCoordinateReferenceSystem(25832), QgsCoordinateTransformContext())
+        self.distanz.setEllipsoid('GRS80')
+
+        self.netz = QgsVectorLayer()
 
     # noinspection PyMethodMayBeStatic
     def tr(self, message):
@@ -183,6 +191,17 @@ class VarMixViewer:
         # remove the toolbar
         del self.toolbar
 
+    @staticmethod
+    def calc_factor(section, xls_feature):
+        section_length = section['Abschnittslaenge']
+        geom = section.geometry()
+        geo_length = geom.length()
+        factor = section_length / geo_length
+        vst = xls_feature['vst'] * factor
+        bst = xls_feature['bst'] * factor
+        points = geom.asPolyline()
+        return points, bst, vst
+
     def cut_line(self, section, xls_feature):
         feat = QgsFeature(xls_feature)
         points, bst, vst = self.calc_factor(section, xls_feature)
@@ -198,15 +217,23 @@ class VarMixViewer:
             if sum > vst and len(line) == 0:
                 # print("Anfang")
                 part = (sum - vst) / dist
-                x = p.x() - part * (p.x() - p_old.x())
-                y = p.y() - part * (p.y() - p_old.y())
+
+                dx = p.x() - p_old.x()
+                dy = p.y() - p_old.y()
+
+                x = p.x() - part * dx
+                y = p.y() - part * dy
 
                 line.append(QgsPointXY(x, y))
             if sum > bst:
                 part = (sum - bst) / dist
                 # print(part)
-                x = p.x() - part * (p.x() - p_old.x())
-                y = p.y() - part * (p.y() - p_old.y())
+
+                dx = p.x() - p_old.x()
+                dy = p.y() - p_old.y()
+
+                x = p.x() - part * dx
+                y = p.y() - part * dy
                 line.append(QgsPointXY(x, y))
                 break
             if sum > vst:
@@ -216,37 +243,33 @@ class VarMixViewer:
         feat.setGeometry(QgsGeometry.fromPolylineXY(line))
         return feat
 
-    @staticmethod
-    def calc_factor(section, xls_feature):
-        section_length = section['Abschnittslaenge']
-        geom = section.geometry()
-        geo_length = geom.length()
-        factor = section_length / geo_length
-        vst = xls_feature['vst'] * factor
-        bst = xls_feature['bst'] * factor
-        points = geom.asPolyline()
-        return points, bst, vst
-
-    def cut_point(self, section, xls_feature):
+    def cut_point(self, section, xls_feature, side_dist_field = -1):
         feat = QgsFeature(xls_feature)
         points, bst, vst = self.calc_factor(section, xls_feature)
 
         p_old = QgsPointXY(points[0])
 
         sum_len = 0
-        line = []
         for p in points:
             p = QgsPointXY(p)
             dist = self.distanz.measureLine(p_old, p)
             sum_len += dist
-            if sum_len > vst and len(line) == 0:
-                # print("Anfang")
+            if sum_len > vst:
                 part = (sum_len - vst) / dist
-                x = p.x() - part * (p.x() - p_old.x())
-                y = p.y() - part * (p.y() - p_old.y())
+
+                dx = p.x() - p_old.x()
+                dy = p.y() - p_old.y()
+
+                side_factor = 0
+                if side_dist_field >= 0:
+                    side_factor = xls_feature[side_dist_field] / dist
+
+                x = p.x() - part * dx + dy * side_factor
+                y = p.y() - part * dy - dx * side_factor
 
                 feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
                 return feat
+            p_old = p
 
     def select_section(self, vnk, nnk):
         """Returns section out of Strassennetz.tab"""
@@ -262,58 +285,74 @@ class VarMixViewer:
         varmix = QgsVectorLayer(self.dlg.mQgsFileWidget.filePath(), "varMix", "ogr")
         # varmix = QgsVectorLayer("D:\kreis.xls", "varMix", "ogr")
 
-        self.distanz = QgsDistanceArea()
-        self.distanz.setSourceCrs(QgsCoordinateReferenceSystem(25832), QgsCoordinateTransformContext())
-        self.distanz.setEllipsoid('GRS80')
-
         # d.setEllipsoidalMode(True)
-        without = QgsVectorLayer("None", "VarMix (Ohne Geometrie)", "memory")
-        without.startEditing()
-        withoutData = without.dataProvider()
+        layer_without = QgsVectorLayer("None", os.path.basename(self.dlg.mQgsFileWidget.filePath()) + " (Ohne Geometrie)", "memory")
+        layer_without.startEditing()
+        without_data = layer_without.dataProvider()
 
-        withoutData.addAttributes(varmix.fields())  #
-        without.commitChanges()
-        QgsProject.instance().addMapLayer(without)
+        without_data.addAttributes(varmix.fields())  #
+        layer_without.commitChanges()
+        QgsProject.instance().addMapLayer(layer_without)
 
-        punkte = QgsVectorLayer("point?crs=" + self.netz.crs().authid(), "VarMix (Punkte)", "memory")
-        punkte.startEditing()
-        punkteData = punkte.dataProvider()
+        layer_points = QgsVectorLayer("point?crs=" + self.netz.crs().authid(), os.path.basename(self.dlg.mQgsFileWidget.filePath()) + " (Punkte)", "memory")
+        layer_points.startEditing()
+        point_data = layer_points.dataProvider()
 
-        punkteData.addAttributes(varmix.fields())  #
-        punkte.commitChanges()
-        QgsProject.instance().addMapLayer(punkte)
+        point_data.addAttributes(varmix.fields())  #
+        layer_points.commitChanges()
+        QgsProject.instance().addMapLayer(layer_points)
 
-        linien = QgsVectorLayer("linestring?crs=" + self.netz.crs().authid(), "VarMix (Linien)", "memory")
-        linien.startEditing()
-        linienData = linien.dataProvider()
+        layer_lines = QgsVectorLayer("linestring?crs=" + self.netz.crs().authid(), os.path.basename(self.dlg.mQgsFileWidget.filePath()) + " (Linien)", "memory")
+        layer_lines.startEditing()
+        lines_data = layer_lines.dataProvider()
 
-        linienData.addAttributes(varmix.fields())  #
-        linien.commitChanges()
-        QgsProject.instance().addMapLayer(linien)
+        lines_data.addAttributes(varmix.fields())  #
+        layer_lines.commitChanges()
+        QgsProject.instance().addMapLayer(layer_lines)
 
-        erg = varmix.getFeatures()
+        results = varmix.getFeatures()
         vnk = ""
         nnk = ""
         feat = None
-        for e in erg:
-            if not (vnk == e['VNK'] and nnk == e['NNK']):
-                vnk = e['VNK']
-                nnk = e['NNK']
+
+        side_dist_field = None;
+
+        for r in results:
+            if not (vnk == r['VNK'] and nnk == r['NNK']):
+                vnk = r['VNK']
+                nnk = r['NNK']
                 feat = self.select_section(vnk, nnk)
             if feat is None:
-                withoutData.addFeatures([e])
-            elif e['VST'] == e['BST']:
-                punkteData.addFeatures([self.cut_point(feat, e)])
-
+                without_data.addFeatures([r])
+            elif r['VST'] == r['BST']:
+                if side_dist_field is None:
+                    self.pld.show()
+                    self.pld.comboBox.clear()
+                    self.pld.comboBox.addItem("-- kein seitlicher Abstand --")
+                    for f in varmix.fields():
+                        self.pld.comboBox.addItem(f.name())
+                    self.pld.comboBox.setCurrentIndex(0)
+                    result = self.pld.exec_()
+                    if result:
+                        side_dist_field = self.pld.comboBox.currentIndex()-1
+                f = self.cut_point(feat, r, side_dist_field)
+                if f is not None:
+                    point_data.addFeatures([f])
+                else:
+                    without_data.addFeatures([r])
             else:
-                linienData.addFeatures([self.cut_line(feat, e)])
+                f = self.cut_line(feat, r)
+                if f is not None:
+                    lines_data.addFeatures([f])
+                else:
+                    without_data.addFeatures([r])
 
-        if linienData.featureCount() == 0:
-            QgsProject.instance().removeMapLayer(linien)
-        if punkteData.featureCount() == 0:
-            QgsProject.instance().removeMapLayer(punkte)
-        if withoutData.featureCount() == 0:
-            QgsProject.instance().removeMapLayer(without)
+        if lines_data.featureCount() == 0:
+            QgsProject.instance().removeMapLayer(layer_lines)
+        if point_data.featureCount() == 0:
+            QgsProject.instance().removeMapLayer(layer_points)
+        if without_data.featureCount() == 0:
+            QgsProject.instance().removeMapLayer(layer_without)
 
     def run(self):
         """Run method that performs all the real work"""
