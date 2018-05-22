@@ -173,7 +173,6 @@ class VarMixViewer:
             callback=self.run,
             parent=self.iface.mainWindow())
 
-
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""
         for action in self.actions:
@@ -184,19 +183,10 @@ class VarMixViewer:
         # remove the toolbar
         del self.toolbar
 
+    def cut_line(self, section, xls_feature):
+        feat = QgsFeature(xls_feature)
+        points, bst, vst = self.calc_factor(section, xls_feature)
 
-    def cutStation(self, abschnitt, zeile):
-        feat = QgsFeature(zeile)
-        alen = abschnitt['Abschnittslaenge']
-        geom = abschnitt.geometry()
-        glen = geom.length()
-
-        faktor = alen / glen
-
-        vst = zeile['vst'] * faktor
-        bst = zeile['bst'] * faktor
-
-        points = geom.asPolyline()
         p_old = QgsPointXY(points[0])
 
         sum = 0
@@ -210,6 +200,7 @@ class VarMixViewer:
                 part = (sum - vst) / dist
                 x = p.x() - part * (p.x() - p_old.x())
                 y = p.y() - part * (p.y() - p_old.y())
+
                 line.append(QgsPointXY(x, y))
             if sum > bst:
                 part = (sum - bst) / dist
@@ -222,19 +213,51 @@ class VarMixViewer:
                 line.append(p)
                 # print(sum)
             p_old = p
-
         feat.setGeometry(QgsGeometry.fromPolylineXY(line))
         return feat
 
+    @staticmethod
+    def calc_factor(section, xls_feature):
+        section_length = section['Abschnittslaenge']
+        geom = section.geometry()
+        geo_length = geom.length()
+        factor = section_length / geo_length
+        vst = xls_feature['vst'] * factor
+        bst = xls_feature['bst'] * factor
+        points = geom.asPolyline()
+        return points, bst, vst
 
-    def selectAbschnitt(self, vnk, nnk):
+    def cut_point(self, section, xls_feature):
+        feat = QgsFeature(xls_feature)
+        points, bst, vst = self.calc_factor(section, xls_feature)
+
+        p_old = QgsPointXY(points[0])
+
+        sum_len = 0
+        line = []
+        for p in points:
+            p = QgsPointXY(p)
+            dist = self.distanz.measureLine(p_old, p)
+            sum_len += dist
+            if sum_len > vst and len(line) == 0:
+                # print("Anfang")
+                part = (sum_len - vst) / dist
+                x = p.x() - part * (p.x() - p_old.x())
+                y = p.y() - part * (p.y() - p_old.y())
+
+                feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
+                return feat
+
+    def select_section(self, vnk, nnk):
+        """Returns section out of Strassennetz.tab"""
         exp = QgsExpression('\"Anfangsnetzknoten\" = \'' + vnk + '\' AND \"Endnetzknoten\" = \'' + nnk + '\'')
         request = QgsFeatureRequest(exp)
         for f in self.netz.getFeatures(request):
             return f
         return None
 
-    def generateLayer(self):
+    def generate_layer(self):
+        """Generates temporary layers with geometry"""
         self.netz = QgsVectorLayer(self.dlg.mQgsFileWidget_2.filePath(), "netz", "ogr")
         varmix = QgsVectorLayer(self.dlg.mQgsFileWidget.filePath(), "varMix", "ogr")
         # varmix = QgsVectorLayer("D:\kreis.xls", "varMix", "ogr")
@@ -244,13 +267,29 @@ class VarMixViewer:
         self.distanz.setEllipsoid('GRS80')
 
         # d.setEllipsoidalMode(True)
-        achsen = QgsVectorLayer("linestring?crs=" + self.netz.crs().authid(), "VarMix", "memory")
-        achsen.startEditing()
-        achsenData = achsen.dataProvider()
+        without = QgsVectorLayer("None", "VarMix (Ohne Geometrie)", "memory")
+        without.startEditing()
+        withoutData = without.dataProvider()
 
-        achsenData.addAttributes(varmix.fields())  #
-        achsen.commitChanges()
-        QgsProject.instance().addMapLayer(achsen)
+        withoutData.addAttributes(varmix.fields())  #
+        without.commitChanges()
+        QgsProject.instance().addMapLayer(without)
+
+        punkte = QgsVectorLayer("point?crs=" + self.netz.crs().authid(), "VarMix (Punkte)", "memory")
+        punkte.startEditing()
+        punkteData = punkte.dataProvider()
+
+        punkteData.addAttributes(varmix.fields())  #
+        punkte.commitChanges()
+        QgsProject.instance().addMapLayer(punkte)
+
+        linien = QgsVectorLayer("linestring?crs=" + self.netz.crs().authid(), "VarMix (Linien)", "memory")
+        linien.startEditing()
+        linienData = linien.dataProvider()
+
+        linienData.addAttributes(varmix.fields())  #
+        linien.commitChanges()
+        QgsProject.instance().addMapLayer(linien)
 
         erg = varmix.getFeatures()
         vnk = ""
@@ -260,14 +299,21 @@ class VarMixViewer:
             if not (vnk == e['VNK'] and nnk == e['NNK']):
                 vnk = e['VNK']
                 nnk = e['NNK']
-                feat = self.selectAbschnitt(vnk, nnk)
+                feat = self.select_section(vnk, nnk)
             if feat is None:
-                # achsenData.addFeatures(e)
-                pass
+                withoutData.addFeatures([e])
+            elif e['VST'] == e['BST']:
+                punkteData.addFeatures([self.cut_point(feat, e)])
+
             else:
-                achsenData.addFeatures([self.cutStation(feat, e)])
+                linienData.addFeatures([self.cut_line(feat, e)])
 
-
+        if linienData.featureCount() == 0:
+            QgsProject.instance().removeMapLayer(linien)
+        if punkteData.featureCount() == 0:
+            QgsProject.instance().removeMapLayer(punkte)
+        if withoutData.featureCount() == 0:
+            QgsProject.instance().removeMapLayer(without)
 
     def run(self):
         """Run method that performs all the real work"""
@@ -279,7 +325,7 @@ class VarMixViewer:
         if result:
             # Do something useful here - delete the line containing pass and
             # substitute with your code.
-            self.generateLayer()
+            self.generate_layer()
             pass
 
 
