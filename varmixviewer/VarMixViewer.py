@@ -287,6 +287,8 @@ class VarMixViewer:
         """Generates temporary layers with geometry"""
         self.netz = QgsVectorLayer(self.dlg.mQgsFileWidget_2.filePath(), "netz", "ogr")
         varmix = QgsVectorLayer(self.dlg.mQgsFileWidget.filePath(), "varMix", "ogr")
+        varmix.setProviderEncoding(u'UTF-8')
+        varmix.dataProvider().setEncoding(u'UTF-8')
         # varmix = QgsVectorLayer("D:\kreis.xls", "varMix", "ogr")
 
         # d.setEllipsoidalMode(True)
