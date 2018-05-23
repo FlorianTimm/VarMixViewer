@@ -196,7 +196,9 @@ class VarMixViewer:
         section_length = section['Abschnittslaenge']
         geom = section.geometry()
         geo_length = geom.length()
-        factor = section_length / geo_length
+        factor = 1
+        if section_length > 0:
+            factor = geo_length / section_length
         vst = xls_feature['vst'] * factor
         bst = xls_feature['bst'] * factor
         points = geom.asPolyline()
@@ -250,11 +252,13 @@ class VarMixViewer:
         p_old = QgsPointXY(points[0])
 
         sum_len = 0
-        for p in points:
-            p = QgsPointXY(p)
+        count_points = len(points)
+        for i in range(count_points):
+            p = QgsPointXY(points[i])
             dist = self.distanz.measureLine(p_old, p)
             sum_len += dist
-            if sum_len > vst:
+            # print(str(sum_len) + " > " + str(vst))
+            if sum_len > vst or i == count_points - 1:
                 part = (sum_len - vst) / dist
 
                 dx = p.x() - p_old.x()
